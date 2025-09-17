@@ -550,19 +550,146 @@ def allFockStates(photons_per_modes, ancillas=None):
     return fock_dict
 
 
-def recursivePerfectMatchings(graph, store, matches=[], edges_left=None):
+def _raw_perfect_matchings(raw_edges):
     '''
-    The heavy lifting of findPerfectMatchings.
+    Generate all perfect matchings of an uncoloured graph.
+
+    Parameters
+    ----------
+    raw_edges : iterable of tuple
+        Iterable with the edges of the graph. Each edge is represented by a
+        two element tuple containing the connected nodes.
+
+    Returns
+    -------
+    list of list
+        List with all perfect matchings of the graph. Each perfect matching is
+        represented by a list with the participating edges. Every edge is
+        returned using the same node ordering as in ``raw_edges``.
     '''
-    if edges_left is None: edges_left = len(np.unique(np.array(graph)[:, :2])) / 2
-    if len(graph) > 0:
-        for edge in targetEdges([nodeDegrees(graph)[0][0]], graph):
-            recursivePerfectMatchings(removeNodes(edge[:2], graph), store,
-                                      matches + [edge], edges_left - 1)
-    elif len(graph) == 0 and edges_left == 0:
-        store.append(sorted(matches))
-    else:
-        pass  # Some nodes are not matched and never will
+
+    raw_edges = list(raw_edges)
+    if len(raw_edges) == 0:
+        return []
+
+    # Build an index for the nodes in order to efficiently keep track of
+    # which vertices are already part of the current partial matching.
+    nodes = sorted(set(itertools.chain.from_iterable(raw_edges)))
+    num_nodes = len(nodes)
+    if num_nodes % 2:
+        return []  # A perfect matching requires an even number of nodes.
+
+    node_to_index = {node: idx for idx, node in enumerate(nodes)}
+    adjacency = [[] for _ in range(num_nodes)]
+
+    for edge in raw_edges:
+        if len(edge) < 2:
+            continue
+        u, v = edge
+        u_idx = node_to_index[u]
+        v_idx = node_to_index[v]
+        if u_idx == v_idx:
+            # Loops can never contribute to a perfect matching. Ignoring them
+            # here avoids useless branches later on.
+            continue
+        adjacency[u_idx].append((v_idx, edge))
+        adjacency[v_idx].append((u_idx, edge))
+
+    # If any node ended up without neighbours after removing loops we can
+    # immediately stop because no perfect matching exists.
+    if any(len(neighbours) == 0 for neighbours in adjacency):
+        return []
+
+    # Ensure deterministic behaviour regardless of the original input order.
+    for neighbours in adjacency:
+        neighbours.sort(key=lambda item: (item[0], item[1]))
+
+    full_mask = (1 << num_nodes) - 1
+    matchings = []
+    stack = [(0, [])]  # (mask of used nodes, list of chosen edges)
+
+    while stack:
+        used_mask, partial_matching = stack.pop()
+        if used_mask == full_mask:
+            matchings.append(tuple(sorted(partial_matching)))
+            continue
+
+        best_node = None
+        candidate_edges = None
+
+        # Choose the next unmatched node with the fewest available neighbours.
+        for node_idx in range(num_nodes):
+            if used_mask & (1 << node_idx):
+                continue
+
+            available_edges = [
+                (nbr_idx, edge)
+                for nbr_idx, edge in adjacency[node_idx]
+                if not (used_mask & (1 << nbr_idx))
+            ]
+
+            if not available_edges:
+                candidate_edges = []
+                break  # This branch can not yield a perfect matching.
+
+            if candidate_edges is None or len(available_edges) < len(candidate_edges):
+                best_node = node_idx
+                candidate_edges = available_edges
+
+        if not candidate_edges:
+            continue
+
+        # Add the next level of the search tree. We iterate in reverse order
+        # so that the lexicographically smallest option is explored first.
+        for neighbour_idx, edge in reversed(candidate_edges):
+            next_mask = used_mask | (1 << best_node) | (1 << neighbour_idx)
+            stack.append((next_mask, partial_matching + [edge]))
+
+    # Deduplicate while preserving the computed order. This guards against the
+    # unlikely event of reaching the same matching through different paths.
+    seen = set()
+    unique_matchings = []
+    for matching in matchings:
+        if matching not in seen:
+            seen.add(matching)
+            unique_matchings.append(list(matching))
+
+    unique_matchings.sort(key=lambda match: tuple(match))
+    return unique_matchings
+
+
+def recursivePerfectMatchings(graph, store, matches=None, edges_left=None):
+    '''
+    Populate ``store`` with all perfect matchings of ``graph``.
+
+    This helper used to rely on Python level recursion which easily hit the
+    interpreter's recursion limit for moderately sized graphs. It now uses an
+    explicit stack to explore the search tree which keeps the call depth small
+    and significantly speeds up the enumeration.
+
+    Parameters
+    ----------
+    graph : iterable of tuple
+        List of uncoloured edges (node1, node2).
+    store : list
+        Container that will be extended with the perfect matchings found.
+    matches : object, optional
+        Ignored. Present for backwards compatibility with the previous
+        implementation that used this parameter internally for the recursive
+        calls.
+    edges_left : object, optional
+        Ignored. Present for backwards compatibility with the previous
+        implementation.
+    '''
+
+    if matches not in (None, []):
+        warnings.warn('The "matches" argument is ignored by recursivePerfectMatchings.',
+                      RuntimeWarning, stacklevel=2)
+    if edges_left is not None:
+        warnings.warn('The "edges_left" argument is ignored by recursivePerfectMatchings.',
+                      RuntimeWarning, stacklevel=2)
+
+    store.extend(_raw_perfect_matchings(graph))
 
 
 def findPerfectMatchings(graph):
